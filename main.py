@@ -32,13 +32,13 @@ proxies = {
 }
 
 id_options = [
-    #("Null", "不定餐"),
+    ("0", "不定餐"),
     ("1", "葷食"),
+    ("2", "拉亞1"),
+    ("3", "拉亞2"),
     ("4", "素食"),
     ("5", "麵食"),
     ("6", "輕食"),
-    ("2", "拉亞1"),
-    ("3", "拉亞2"),
 ]
 weekday_names = ["週一", "週二", "週三", "週四", "週五"]
 
@@ -64,7 +64,7 @@ CANCEL_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("❌ 取消設定", callback_data="cancel_setting")],
 ])
 
-
+# save user data
 def load_user_data():
     global user_work_ids, user_weekday_id_map, user_urls, user_day_index_map
     if os.path.exists(DATA_FILE):
@@ -109,25 +109,37 @@ def send_query_and_report(bot=None, requester=None):
         print(params)
         url = "https://www.ingrasys.com/nq/hrorder/ConnDB.ashx"
         response = requester(url, params=params, proxies=proxies)
-        asyncio.run(bot.send_message(chat_id=chat_id, text=f"工號={work_id}：送出訂餐 '{id_options[int(weekday_id_map[today]) - 1][1]}'\n{response.text}"))
+        asyncio.run(bot.send_message(chat_id=chat_id, text=f"工號={work_id}：送出訂餐 '{id_options[int(weekday_id_map[today])][1]}'\n{response.text}"))
 
-def fetch_index_value():
+def fetch_index_value(max_retries=3, retry_delay=5):
     for chat_id, uuid in user_urls.items():
-        try:
-            url = f"https://www.ingrasys.com/nq/{uuid}/#slide1"
-            r = requests.get(url, proxies=proxies, timeout=360)
-            match = re.search(r'name="hf_day"[^>]*value="(\d+)"', r.text)
-            if match:
-                hf_day_value = match.group(1)
-                user_day_index_map[chat_id] = hf_day_value
-                print(f"[更新] {chat_id}: hf_day={hf_day_value}")
-            else:
-                print(f"[警告] {chat_id}: 未找到 hf_day 值")
-                user_day_index_map[chat_id] = ""
-        except Exception as e:
-            print(f"[錯誤] {chat_id}: 抓取 hf_day 失敗 {e}")
-    
-    save_user_data() # 
+        success = False
+        for attempt in range(1, max_retries + 1):
+            try:
+                url = f"https://www.ingrasys.com/nq/{uuid}/#slide1"
+                r = requests.get(url, proxies=proxies, timeout=60)
+                match = re.search(r'name="hf_day"[^>]*value="(\d+)"', r.text)
+
+                if match:
+                    hf_day_value = match.group(1)
+                    user_day_index_map[chat_id] = hf_day_value
+                    print(f"[更新] {chat_id}: hf_day={hf_day_value}")
+                    success = True
+                    break
+                else:
+                    print(f"[警告] {chat_id}: 第{attempt}次未找到 hf_day 值，重試中...")
+                    time.sleep(retry_delay)
+
+            except Exception as e:
+                print(f"[錯誤] {chat_id}: 第{attempt}次抓取失敗 {e}")
+                time.sleep(retry_delay)
+
+        if not success:
+            print(f"[失敗] {chat_id}: 重試 {max_retries} 次後仍未抓到")
+            user_day_index_map[chat_id] = ""
+
+    save_user_data()
+
 
 async def set_bot_commands(app):
     commands = [
@@ -326,12 +338,12 @@ def main():
     app.add_handler(CommandHandler('menu', menu))
     app.add_handler(CallbackQueryHandler(menu_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
     print("TELEGRAM DEBUG 1")
+
     scheduler = BackgroundScheduler()
-    scheduler.add_job(fetch_index_value, 'cron', hour=8, minute=25, day_of_week='mon-fri', timezone=tz)
+    scheduler.add_job(fetch_index_value, 'cron', hour=6, minute=00, day_of_week='mon-fri', timezone=tz)
     # scheduler.add_job(fetch_index_value, 'interval', minutes=1, timezone=tz)
-    scheduler.add_job(send_query_and_report, 'cron', hour=8, minute=30, day_of_week='mon-fri', timezone=tz)
+    scheduler.add_job(send_query_and_report, 'cron', hour=6, minute=30, day_of_week='mon-fri', timezone=tz)
     # scheduler.add_job(send_query_and_report, 'interval', minutes=2, timezone=tz)
     scheduler.start()
     print("TELEGRAM DEBUG 2")
