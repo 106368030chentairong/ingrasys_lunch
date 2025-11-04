@@ -1,5 +1,6 @@
 # python
 __pycache__/
+*.py[cod]
 user_data.json
 
 # VS Code
