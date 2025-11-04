@@ -8,12 +8,16 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.ext import MessageHandler, filters
 from telegram import ReplyKeyboardMarkup
 from telegram import BotCommand
+from telegram import Bot
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import re
 import json
 import os
 import pytz
+
+import asyncio
+import aiohttp
 
 DATA_FILE = "user_data.json"
 user_work_ids = {}
@@ -50,8 +54,7 @@ REPLY_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard = True
 )
 
-# === 預先建立鍵盤 ===
-# === 主選單 ===
+# main menu keyboard
 MAIN_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("🍱 設定各天餐點（逐日設定）", callback_data='set_weekday_id')],
     [InlineKeyboardButton("✅ 統一設定所有平日餐點", callback_data="unified_set_id")],
@@ -87,8 +90,9 @@ def save_user_data():
             "user_day_index_map": user_day_index_map,
         }, f, ensure_ascii=False, indent=2)
 
+
+# send order query and report results
 def send_query_and_report(bot=None, requester=None):
-    from telegram import Bot
     bot = bot or Bot(token=TELEGRAM_TOKEN)
     requester = requester or requests.get
 
@@ -111,36 +115,37 @@ def send_query_and_report(bot=None, requester=None):
         response = requester(url, params=params, proxies=proxies)
         asyncio.run(bot.send_message(chat_id=chat_id, text=f"工號={work_id}：送出訂餐 '{id_options[int(weekday_id_map[today])][1]}'\n{response.text}"))
 
-def fetch_index_value(max_retries=3, retry_delay=5):
-    for chat_id, uuid in user_urls.items():
-        success = False
-        for attempt in range(1, max_retries + 1):
-            try:
-                url = f"https://www.ingrasys.com/nq/{uuid}/#slide1"
-                r = requests.get(url, proxies=proxies, timeout=60)
-                match = re.search(r'name="hf_day"[^>]*value="(\d+)"', r.text)
 
+# get hf_day index value asynchronously
+async def fetch_hf_day(session, chat_id, uuid, retry_delay=5, max_retries=3):
+    url = f"https://www.ingrasys.com/nq/{uuid}/#slide1"
+    for attempt in range(max_retries):
+        try:
+            async with session.get(url, timeout=60) as resp:
+                text = await resp.text()
+                match = re.search(r'name="hf_day"[^>]*value="(\d+)"', text)
                 if match:
-                    hf_day_value = match.group(1)
-                    user_day_index_map[chat_id] = hf_day_value
-                    print(f"[更新] {chat_id}: hf_day={hf_day_value}")
-                    success = True
-                    break
-                else:
-                    print(f"[警告] {chat_id}: 第{attempt}次未找到 hf_day 值，重試中...")
-                    time.sleep(retry_delay)
+                    return chat_id, match.group(1)
+        except Exception as e:
+            print(f"[錯誤] {chat_id}: 第{attempt+1}次抓取失敗 {e}")
+            await asyncio.sleep(retry_delay)
+    return chat_id, None
 
-            except Exception as e:
-                print(f"[錯誤] {chat_id}: 第{attempt}次抓取失敗 {e}")
-                time.sleep(retry_delay)
-
-        if not success:
-            print(f"[失敗] {chat_id}: 重試 {max_retries} 次後仍未抓到")
-            user_day_index_map[chat_id] = ""
-
+async def fetch_index_value_async(user_urls, user_day_index_map):
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_hf_day(session, chat_id, uuid) for chat_id, uuid in user_urls.items()]
+        results = await asyncio.gather(*tasks)
+        for chat_id, hf_day_value in results:
+            if hf_day_value:
+                user_day_index_map[chat_id] = hf_day_value
+                print(f"[更新] {chat_id}: hf_day={hf_day_value}")
+            else:
+                print(f"[失敗] {chat_id}: 未抓到 hf_day")
+                user_day_index_map[chat_id] = ""
     save_user_data()
 
 
+# bot commands
 async def set_bot_commands(app):
     commands = [
         BotCommand("start", "顯示主選單"),
@@ -151,18 +156,23 @@ async def set_bot_commands(app):
     ]
     await app.bot.set_my_commands(commands)
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        today = datetime.date.today()
-        days_since_sunday = today.weekday() + 1  # 星期一=0，星期日=6 → +1 才回到上週日
-        last_sunday = today - datetime.timedelta(days=days_since_sunday)
-        date_str = last_sunday.strftime("%Y%m%d")
-        url = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg"
-        print(url)
-        await update.message.reply_text(url)
 
+# show menu image
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.date.today()
+    days_since_sunday = today.weekday() + 1  # 星期一=0，星期日=6 → +1 才回到上週日
+    last_sunday = today - datetime.timedelta(days=days_since_sunday)
+    date_str = last_sunday.strftime("%Y%m%d")
+    url = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg"
+    print(url)
+    await update.message.reply_text(url)
+
+
+# handle text messages
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[DEBUG] Received text: {update.message.text}")
     text = update.message.text
+
     if text == "🍱 設定每日餐點":
         keyboard = [[InlineKeyboardButton(day, callback_data=f"weekday_{i}")] for i, day in enumerate(weekday_names)]
         keyboard += [[InlineKeyboardButton("⬅ 返回主選單", callback_data="back_main")]]
@@ -173,7 +183,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⬅ 返回主選單", callback_data="back_main")])
         await update.message.reply_text("請選擇要套用到整週的餐點種類：", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif text in "本週菜單":
+    elif text == "本週菜單":
         today = datetime.date.today()
         days_since_sunday = today.weekday() + 1  # 星期一=0，星期日=6 → +1 才回到上週日
         last_sunday = today - datetime.timedelta(days=days_since_sunday)
@@ -207,6 +217,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = requester(url, params=params, proxies=proxies) """
 
 
+# start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in user_work_ids:
@@ -219,7 +230,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text("功能選單：", reply_markup=MAIN_MENU)
 
-
+# setid command
 async def setid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
@@ -234,6 +245,7 @@ async def setid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"你的工號已設定為：{work_id}\n餐點初始設定每天為 “輕食”\n請使用 /start 開始設定每週平日餐點。"
     )
 
+# seturl command
 async def seturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in user_work_ids:
@@ -255,6 +267,7 @@ async def seturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(f"你的訂餐UUID已設定為：{uuid}")
 
 
+# define menu button callback handler
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -296,7 +309,7 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        reply_markup=MAIN_MENU)
 
     elif data == "unified_set_id":
-        keyboard = [[InlineKeyboardButton(name, callback_data=f"unifiedid_{id_}")] for id_, name in id_options]
+        keyboard = [[InlineKeyboardButton(name, callback_data=f"unifiedid_{id_}")] for id_, name in id_options] # "id_options" set lunch for whole week
         keyboard.append([InlineKeyboardButton("⬅ 返回主選單", callback_data="back_main")])
         await query.message.reply_text("請選擇要套用到整週（週一至五）的餐點種類：", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -304,7 +317,7 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         id_selected = data.split('_')[1]
         for i in range(5):
             user_weekday_id_map[chat_id][i] = id_selected
-        name_selected = next(name for id_, name in id_options if id_ == id_selected)
+        name_selected = next(name for id_, name in id_options if id_ == id_selected) # "id_options" set lunch for whole week
         save_user_data()
         await query.message.reply_text(f"已將週一至週五的餐點全部設定為：{id_selected}（{name_selected}）",
                                        reply_markup=MAIN_MENU)
@@ -320,6 +333,11 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg"
         print(url)
         await query.message.reply_text(url, reply_markup=MAIN_MENU)
+
+
+# wrapper for async send_query_and_report
+async def send_query_and_report_wrapper():
+    await send_query_and_report()
 
 
 def main():
@@ -340,17 +358,14 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("TELEGRAM DEBUG 1")
 
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(fetch_index_value, 'cron', hour=6, minute=00, day_of_week='mon-fri', timezone=tz)
-    # scheduler.add_job(fetch_index_value, 'interval', minutes=1, timezone=tz)
-    scheduler.add_job(send_query_and_report, 'cron', hour=6, minute=30, day_of_week='mon-fri', timezone=tz)
-    # scheduler.add_job(send_query_and_report, 'interval', minutes=2, timezone=tz)
+    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler.add_job(fetch_index_value_async, 'cron', hour=6, minute=0, day_of_week='mon-fri')
+    scheduler.add_job(send_query_and_report_wrapper, 'cron', hour=6, minute=30, day_of_week='mon-fri')
     scheduler.start()
     print("TELEGRAM DEBUG 2")
 
     app.post_init = set_bot_commands
     print("Bot is polling...")
-    # app.run_polling()
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
