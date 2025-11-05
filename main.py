@@ -178,9 +178,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days_since_sunday = today.weekday() + 1  # 星期一=0，星期日=6 → +1 才回到上週日
     last_sunday = today - datetime.timedelta(days=days_since_sunday)
     date_str = last_sunday.strftime("%Y%m%d")
+    """     
     url = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg"
-    print(url)
-    await update.message.reply_text(url)
+    await update.message.reply_text(url) 
+    """
+    url_1 = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg \n"
+    url_2 = f"https://www.ingrasys.com/nq/hr/Content/vmenu{date_str}.jpg \n"
+    print(url_1)
+    await update.message.reply_photo(photo=url_1)
+    await update.message.reply_photo(photo=url_2, reply_markup=MAIN_MENU)
 
 
 # handle text messages
