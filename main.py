@@ -92,29 +92,44 @@ def save_user_data():
 
 
 # send order query and report results
-def send_query_and_report(bot=None, requester=None):
+async def send_query_and_report(bot=None, requester=None):
     bot = bot or Bot(token=TELEGRAM_TOKEN)
     requester = requester or requests.get
 
-    for chat_id, work_id in user_work_ids.items():
-        weekday_id_map = user_weekday_id_map.get(chat_id, {i: "4" for i in range(5)})
-        today = datetime.datetime.now().weekday()
-        if today not in weekday_id_map:
-            continue
-        params = {
-            "act": 1,
-            "order": "L",
-            "id": weekday_id_map[today],
-            "index": user_day_index_map[chat_id],
-            "iok": work_id,
-            "uid": work_id,
-            "_": int(time.time() * 1000)
-        }
-        print(params)
-        url = "https://www.ingrasys.com/nq/hrorder/ConnDB.ashx"
-        response = requester(url, params=params, proxies=proxies)
-        asyncio.run(bot.send_message(chat_id=chat_id, text=f"工號={work_id}：送出訂餐 '{id_options[int(weekday_id_map[today])][1]}'\n{response.text}"))
+    async with aiohttp.ClientSession() as session:
+        for chat_id, work_id in user_work_ids.items():
+            weekday_id_map = user_weekday_id_map.get(chat_id, {i: "4" for i in range(5)})
+            today = datetime.datetime.now(tz).weekday() # 0..6
+            # only handle mon-fri
+            if today > 4:
+                continue
+            if today not in weekday_id_map:
+                continue
 
+            params = {
+                "act": 1,
+                "order": "L",
+                "id": weekday_id_map[today],
+                "index": user_day_index_map[chat_id],
+                "iok": work_id,
+                "uid": work_id,
+                "_": int(time.time() * 1000)
+            }
+            print("[訂餐] chat_id:", chat_id, "params:", params)
+            url = "https://www.ingrasys.com/nq/hrorder/ConnDB.ashx"
+            try:
+                # aiohttp supports proxy via `proxy=` argument
+                proxy = proxies.get("https")
+                async with session.get(url, params=params, proxy=proxy, timeout=60) as resp:
+                    text = await resp.text()
+                    msg = f"工號={work_id}：送出訂餐 '{id_options[int(weekday_id_map[today])][1]}'\n{text}"
+                    await bot.send_message(chat_id=chat_id, text=msg)
+            except Exception as e:
+                print(f"[錯誤] 發送訂餐失敗 {chat_id}: {e}")
+                try:
+                    await bot.send_message(chat_id=chat_id, text=f"工號={work_id}：訂餐時發生錯誤：{e}")
+                except Exception:
+                    pass
 
 # get hf_day index value asynchronously
 async def fetch_hf_day(session, chat_id, uuid, retry_delay=5, max_retries=3):
@@ -330,9 +345,11 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         days_since_sunday = today.weekday() + 1  # 星期一=0，星期日=6 → +1 才回到上週日
         last_sunday = today - datetime.timedelta(days=days_since_sunday)
         date_str = last_sunday.strftime("%Y%m%d")
-        url = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg"
-        print(url)
-        await query.message.reply_text(url, reply_markup=MAIN_MENU)
+        url_1 = f"https://www.ingrasys.com/nq/hr/Content/menu{date_str}.jpg \n"
+        url_2 = f"https://www.ingrasys.com/nq/hr/Content/vmenu{date_str}.jpg \n"
+        print(url_1)
+        await query.message.reply_photo(photo=url_1)
+        await query.message.reply_photo(photo=url_2, reply_markup=MAIN_MENU)
 
 
 # wrapper for async send_query_and_report
@@ -359,8 +376,16 @@ def main():
     print("TELEGRAM DEBUG 1")
 
     scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(fetch_index_value_async, 'cron', hour=6, minute=0, day_of_week='mon-fri')
-    scheduler.add_job(send_query_and_report_wrapper, 'cron', hour=6, minute=30, day_of_week='mon-fri')
+    # scheduler.add_job(fetch_index_value_async, 'cron', hour=6, minute=0, day_of_week='mon-fri')
+    scheduler.add_job(
+    fetch_index_value_async,
+        'cron',
+        hour=7,
+        minute=0,
+        day_of_week='mon-fri',
+        args=[user_urls, user_day_index_map]
+    )
+    scheduler.add_job(send_query_and_report_wrapper, 'cron', hour=7, minute=10, day_of_week='mon-fri')
     scheduler.start()
     print("TELEGRAM DEBUG 2")
 

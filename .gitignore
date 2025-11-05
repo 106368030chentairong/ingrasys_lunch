@@ -1,6 +1,7 @@
 # python
 __pycache__/
 *.py[cod]
+.pytest_cache
 user_data.json
 
 # VS Code
@@ -15,3 +16,6 @@ user_data.json
 # Tmp File
 checkpoints/*
 datasets/output/*# ingrasys_lunch
+
+# log file 
+log.*
