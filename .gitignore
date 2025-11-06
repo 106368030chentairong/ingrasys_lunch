@@ -18,4 +18,5 @@ checkpoints/*
 datasets/output/*# ingrasys_lunch
 
 # log file 
-log.*
+log*
+nohup.out

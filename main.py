@@ -132,11 +132,12 @@ async def send_query_and_report(bot=None, requester=None):
                     pass
 
 # get hf_day index value asynchronously
-async def fetch_hf_day(session, chat_id, uuid, retry_delay=5, max_retries=3):
+async def fetch_hf_day(session, chat_id, uuid, retry_delay=10, max_retries=3):
+    proxy = "http://10.62.163.224:7740"
     url = f"https://www.ingrasys.com/nq/{uuid}/#slide1"
     for attempt in range(max_retries):
         try:
-            async with session.get(url, timeout=60) as resp:
+            async with session.get(url, proxy=proxy, timeout=60) as resp:
                 text = await resp.text()
                 match = re.search(r'name="hf_day"[^>]*value="(\d+)"', text)
                 if match:
@@ -147,7 +148,7 @@ async def fetch_hf_day(session, chat_id, uuid, retry_delay=5, max_retries=3):
     return chat_id, None
 
 async def fetch_index_value_async(user_urls, user_day_index_map):
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as session: 
         tasks = [fetch_hf_day(session, chat_id, uuid) for chat_id, uuid in user_urls.items()]
         results = await asyncio.gather(*tasks)
         for chat_id, hf_day_value in results:
